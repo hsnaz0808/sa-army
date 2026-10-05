@@ -90,16 +90,26 @@ Return ONLY JSON with keys customer_name, customer_phone, car_model, area (null 
             pass
     return regex_lead(msg)   # fallback if the AI fails / the free model returns garbage
 
+REQUIRED = {"customer_name": "customer name", "customer_phone": "customer phone", "car_model": "car model", "area": "area"}
+
+def clean(v):
+    v = str(v).strip() if v is not None else ""
+    return "" if v.lower() in ("null", "none", "n/a", "-") else v   # AI sometimes returns the text "null"
+
 def save_lead(sa_id, p):
-    if not any(p.get(k) for k in ("customer_name", "customer_phone", "car_model", "area")):
-        return False, "No lead info found in the message."
-    ph = norm_phone(p.get("customer_phone"))
-    if ph and len(q("SELECT id FROM leads WHERE customer_phone=?", (ph,))):
+    p = {k: clean(p.get(k)) for k in REQUIRED}
+    ph = norm_phone(p["customer_phone"])
+    missing = [label for k, label in REQUIRED.items() if not p[k]]
+    if p["customer_phone"] and not 10 <= len(ph) <= 12:
+        missing.append("a valid customer phone (e.g. 0123456789)")
+    if missing:
+        return False, "Lead NOT saved. Missing or invalid: " + ", ".join(missing) + ". Please resend with all details."
+    if len(q("SELECT id FROM leads WHERE customer_phone=?", (ph,))):
         return False, "This lead already exists (same customer phone). Duplicate avoided."
     ex("INSERT INTO leads (sa_id, customer_name, customer_phone, car_model, area, created_at) VALUES (?,?,?,?,?,?)",
-       (sa_id, p.get("customer_name"), ph or None, p.get("car_model"), p.get("area"), now()))
-    ex("UPDATE sas SET status='Activated' WHERE id=?", (sa_id,))
-    log("lead", f"New lead from SA #{sa_id}: {p.get('customer_name')} ({p.get('car_model')})")
+       (sa_id, p["customer_name"], ph, p["car_model"], p["area"], now()))
+    ex("UPDATE sas SET status='Activated' WHERE id=?", (sa_id,))   # activated only by a complete, valid lead
+    log("lead", f"New lead from SA #{sa_id}: {p['customer_name']} ({p['car_model']})")
     return True, "Lead received!"
 
 def set_lead_status(lead_id, status):
@@ -141,6 +151,7 @@ def seed_demo():
             if i < 8:
                 c.execute("INSERT INTO outreach (dealership_id, message, status, created_at, recipient, recipient_phone) VALUES (?,?,?,?,?,?)",
                     (dids[-1], f"Hi, we are from Energi Elite. For every E1 charger sold through your referral at {b} {a}, you earn RM200. Interested to know more?", "Sent", ago(20 - i), f"[DEMO] {b} {a}", f"6011000{i:04d}"))
+                c.execute("INSERT INTO activity_log (event_type, description, created_at) VALUES (?,?,?)", ("outreach", f"Marked as sent: [DEMO] {b} {a}", ago(20 - i)))
         for n, (name, di, state, plan) in enumerate(sas, 1):
             code = f"EE-{name.split()[0].upper()[:6]}{n:02d}" if state != "invited" else None
             joined = ago(max([d for d, _ in plan], default=5) + 3) if state == "active" else ago(5 if state == "signed" else 2)
@@ -159,6 +170,9 @@ def seed_demo():
                     paid = d >= 10
                     c.execute("INSERT INTO commissions (sa_id, lead_id, amount, status, created_at, paid_at) VALUES (?,?,?,?,?,?)",
                         (sid, lid, COMMISSION, "Paid" if paid else "Payable", ago(d), ago(max(d - 3, 0)) if paid else None))
+                    c.execute("INSERT INTO activity_log (event_type, description, created_at) VALUES (?,?,?)", ("sale", f"Lead #{lid} SOLD, RM{COMMISSION} commission for {name}", ago(d)))
+                    if paid:
+                        c.execute("INSERT INTO activity_log (event_type, description, created_at) VALUES (?,?,?)", ("paid", f"Commission paid to {name} (RM{COMMISSION})", ago(max(d - 3, 0))))
         c.commit()
 
 # ---------------- UI helpers ----------------
@@ -184,7 +198,7 @@ def flash(msg):
 def target(phone):
     """Test mode ON (default): every WhatsApp link goes to the test number, never a real person."""
     if st.session_state.get("test_mode", True):
-        return norm_phone(st.session_state.get("test_number", "60143912303"))
+        return norm_phone(st.session_state.get("test_number", "60123456789"))
     return norm_phone(phone)
 
 def wa_link(phone, text):
@@ -218,7 +232,7 @@ if role == "🛠 Admin":
             seed_demo(); st.session_state.pop("sa_id", None)
             flash("Demo data loaded. Demo SA login: 0110010001 / PIN 1234 (Ahmad Faizal)."); st.rerun()
     st.sidebar.checkbox("🔒 Test mode (WhatsApp goes to the test number only)", value=True, key="test_mode")
-    st.sidebar.text_input("Test number", "60143912303", key="test_number")
+    st.sidebar.text_input("Test number", "60123456789", key="test_number")
 else:
     page = st.sidebar.radio("Menu", ["📝 Sign Up", "💬 Send Lead", "💰 My Dashboard", "🏆 Leaderboard"])
     if "sa_id" in st.session_state and st.sidebar.button("Log out"):
@@ -288,16 +302,16 @@ elif page == "✉️ Outreach":
                (int(row["id"]), st.session_state["draft_box"], now(), row["name"], row["phone"]))
             log("outreach", f"Approved outreach for {row['name']}")
             del st.session_state["draft_box"]
-            flash("✅ Saved to 'Approved messages' below. Open WhatsApp, then press 'Mark as sent' so the dealership counts as Contacted."); st.rerun()
-        st.divider(); st.subheader("Approved messages")
-    st.caption("Status flow: Approved → (you send it on WhatsApp) → Sent. Sent messages disappear from this list.")
-    msgs = q("""SELECT o.*, COALESCE(o.recipient, d.name) who, COALESCE(o.recipient_phone, d.phone) ph
-                FROM outreach o JOIN dealerships d ON d.id=o.dealership_id
-                WHERE o.status != 'Sent' ORDER BY o.id DESC""")
-    if msgs.empty:
-        st.success("No messages waiting. Everything has been sent 🎉")
-    for n, o in msgs.iterrows():
-        with st.expander(f"{o['who']}  ·  {o['status']}  ·  {o['created_at']}", expanded=(n == 0)):
+            flash("✅ Saved to 'To send' below. Open WhatsApp, then press 'Mark as sent' so the dealership counts as Contacted."); st.rerun()
+    st.divider()
+    Q = """SELECT o.*, COALESCE(o.recipient, d.name) who, COALESCE(o.recipient_phone, d.phone) ph
+           FROM outreach o JOIN dealerships d ON d.id=o.dealership_id WHERE o.status{op}'Sent' ORDER BY o.id DESC"""
+    pend = q(Q.format(op="!="))
+    st.subheader(f"📨 To send ({len(pend)})")
+    st.caption("Approved → open WhatsApp → press 'Mark as sent'. Sent messages leave this list and move to the history below.")
+    if pend.empty: st.success("Nothing waiting to be sent.")
+    for n, o in pend.iterrows():
+        with st.expander(f"{o['who']}  ·  {o['created_at']}", expanded=(n == 0)):
             st.write(o["message"])
             a, b = st.columns(2)
             a.link_button("Open WhatsApp", wa_link(target(o["ph"]), o["message"]), use_container_width=True)
@@ -305,12 +319,10 @@ elif page == "✉️ Outreach":
                 ex("UPDATE outreach SET status='Sent' WHERE id=?", (int(o["id"]),))
                 ex("UPDATE dealerships SET status='Contacted' WHERE id=?", (int(o["dealership_id"]),))
                 log("outreach", f"Marked as sent: {o['who']}"); st.rerun()
-
-    with st.expander("📂 Sent message history (last 10)"):
-        done = q("""SELECT COALESCE(o.recipient, d.name) recipient, o.created_at, o.message
-                    FROM outreach o JOIN dealerships d ON d.id=o.dealership_id
-                    WHERE o.status='Sent' ORDER BY o.id DESC LIMIT 10""")
-        st.dataframe(done, use_container_width=True, hide_index=True)
+    sent = q(Q.format(op="=") .replace("ORDER BY o.id DESC", "ORDER BY o.id DESC LIMIT 200"))
+    with st.expander(f"📜 Sent history ({len(sent)})"):
+        if sent.empty: st.info("Nothing sent yet.")
+        else: st.dataframe(sent[["who", "message", "created_at"]].rename(columns={"who": "recipient"}), use_container_width=True, hide_index=True)
 
 elif page == "👥 SAs":
     hero("Sales Advisors", "Import a target list, personal outreach, keep SAs active.")
@@ -352,7 +364,7 @@ elif page == "👥 SAs":
                    (int(dl["id"]), st.session_state["sa_draft"], now(), info.loc[pick, "name"], info.loc[pick, "phone"]))
                 log("outreach", f"Approved personal outreach for {info.loc[pick, 'name']}")
                 del st.session_state["sa_draft"]
-                flash("✅ Saved. Find it in Outreach → Approved messages, and mark it as sent after WhatsApp."); st.rerun()
+                flash("✅ Saved. Find it in Outreach → To send, and mark it as sent after WhatsApp."); st.rerun()
 
     st.subheader("😴 Dormant SAs (no lead in 14 days)")
     cut = (datetime.now() - timedelta(days=14)).isoformat()
@@ -373,56 +385,63 @@ elif page == "👥 SAs":
                    (int(r["dealership_id"]), st.session_state[k], now(), r["name"], r["phone"]))
                 log("outreach", f"Approved nudge for {r['name']}")
                 del st.session_state[k]
-                flash("✅ Nudge saved. Find it in Outreach → Approved messages."); st.rerun()
+                flash("✅ Nudge saved. Find it in Outreach → To send."); st.rerun()
 
 elif page == "📋 Leads & Commissions":
     hero("Leads & Commissions", "RM200 commission is only created when lead status = Sold.")
-    sa_list = q("SELECT id, name FROM sas WHERE status != 'Invited' ORDER BY name")
-    sa_opts = {"All SAs": None, **{f"{r['name']} (#{r['id']})": int(r['id']) for _, r in sa_list.iterrows()}}
-    f1, f2 = st.columns(2)
-    sa_f = sa_opts[f1.selectbox("🔎 Select SA", list(sa_opts))]
-    st_f = f2.selectbox("Lead status", ["All"] + LEAD_STATUSES)
-
-    t1, t2 = st.tabs(["Lead pipeline", "Commission payouts"])
-    with t1:
-        l = q("""SELECT l.id, s.name sa, l.customer_name, l.car_model, l.area, l.status, l.created_at
-                 FROM leads l JOIN sas s ON s.id=l.sa_id
-                 WHERE (? IS NULL OR l.sa_id=?) AND (?='All' OR l.status=?)
-                 ORDER BY l.id DESC""", (sa_f, sa_f, st_f, st_f))
-        st.caption(f"{len(l)} lead(s)")
-        st.dataframe(l, use_container_width=True, hide_index=True)
-        if len(l):
-            a, b, c = st.columns([2, 2, 1])
-            lid = a.selectbox("Lead", l.id, format_func=lambda i: f"#{i} {l[l.id == i].customer_name.iloc[0]} ({l[l.id == i].status.iloc[0]})")
-            ns = b.selectbox("New status", LEAD_STATUSES)
-            if c.button("Update", use_container_width=True): set_lead_status(int(lid), ns); st.rerun()
-    with t2:
-        c = q("""SELECT c.id, s.name sa, c.lead_id, c.amount, c.status, c.paid_at
-                 FROM commissions c JOIN sas s ON s.id=c.sa_id
-                 WHERE (? IS NULL OR c.sa_id=?) ORDER BY c.status='Paid', c.id DESC""", (sa_f, sa_f))
-        m1, m2 = st.columns(2)
-        m1.metric("Payable", f"RM{c[c.status == 'Payable'].amount.sum():.0f}")
-        m2.metric("Paid", f"RM{c[c.status == 'Paid'].amount.sum():.0f}")
-        st.dataframe(c, use_container_width=True, hide_index=True)
-        due = c[c.status == "Payable"]
-        if len(due):
-            cid = st.selectbox("Mark as paid", due.id)
-            if st.button("💸 Mark Paid"):
-                ex("UPDATE commissions SET status='Paid', paid_at=? WHERE id=?", (now(), int(cid))); log("paid", f"Commission #{cid} paid"); st.rerun()
+    pool = q("SELECT s.id, s.name, COUNT(l.id) n FROM sas s JOIN leads l ON l.sa_id=s.id GROUP BY s.id ORDER BY s.name")
+    if pool.empty:
+        st.info("No leads yet.")
+    else:
+        P = pool.set_index("id")
+        who = st.selectbox("👤 Focus on one SA (type to search)", [0] + list(P.index),
+                           format_func=lambda i: "All SAs" if i == 0 else f"{P.loc[i, 'name']} ({P.loc[i, 'n']} leads)")
+        flt, prm = ("", ()) if who == 0 else (" AND s.id=?", (int(who),))
+        if who:
+            lc = q("SELECT status, COUNT(*) n FROM leads WHERE sa_id=? GROUP BY status", (int(who),))
+            cm = q("SELECT status, COALESCE(SUM(amount),0) a FROM commissions WHERE sa_id=? GROUP BY status", (int(who),))
+            lcnt, cam = dict(zip(lc.status, lc.n)), dict(zip(cm.status, cm.a))
+            k = st.columns(4)
+            k[0].metric("Leads", int(lc.n.sum())); k[1].metric("Sold", int(lcnt.get("Sold", 0)))
+            k[2].metric("Payable", f"RM{cam.get('Payable', 0):.0f}"); k[3].metric("Paid", f"RM{cam.get('Paid', 0):.0f}")
+        t1, t2 = st.tabs(["Lead pipeline", "Commission payouts"])
+        with t1:
+            sf = st.selectbox("Status", ["All"] + LEAD_STATUSES, key="lead_status_filter")
+            l = q("SELECT l.id, s.name sa, l.customer_name, l.car_model, l.area, l.status, l.created_at FROM leads l JOIN sas s ON s.id=l.sa_id WHERE 1=1"
+                  + flt + " ORDER BY l.id DESC", prm)
+            if sf != "All": l = l[l.status == sf]
+            st.dataframe(l, use_container_width=True, hide_index=True)
+            if len(l):
+                a, b, c = st.columns([2, 2, 1])
+                lid = a.selectbox("Lead", l.id, format_func=lambda i: f"#{i} {l[l.id == i].customer_name.iloc[0]} ({l[l.id == i].sa.iloc[0]})")
+                ns = b.selectbox("New status", LEAD_STATUSES)
+                if c.button("Update", use_container_width=True): set_lead_status(int(lid), ns); st.rerun()
+        with t2:
+            cf = st.selectbox("Show", ["Payable", "Paid", "All"], key="comm_filter")
+            cm_df = q("""SELECT c.id, s.name sa, l.customer_name, c.amount, c.status, c.paid_at FROM commissions c
+                         JOIN sas s ON s.id=c.sa_id LEFT JOIN leads l ON l.id=c.lead_id WHERE 1=1""" + flt + " ORDER BY c.id DESC", prm)
+            if cf != "All": cm_df = cm_df[cm_df.status == cf]
+            st.dataframe(cm_df, use_container_width=True, hide_index=True)
+            due = cm_df[cm_df.status == "Payable"]
+            if len(due):
+                lab = {r.id: f"#{r.id} · {r.sa} · {r.customer_name} · RM{r.amount:.0f}" for r in due.itertuples()}
+                cid = st.selectbox("Mark as paid", list(lab), format_func=lab.get)
+                if st.button("💸 Mark Paid"):
+                    ex("UPDATE commissions SET status='Paid', paid_at=? WHERE id=?", (now(), int(cid))); log("paid", f"Commission #{cid} paid"); st.rerun()
 
 elif page == "📜 Activity":
-    hero("Activity Log", "Everything that happens in the system.")
-    cats = {"All": None, "📥 Lead": ["lead"], "📝 Signup": ["signup"], "🏆 Sale": ["sale"],
-            "💸 Paid": ["paid"], "✉️ Outreach": ["outreach"], "⚙️ Other": ["dealer", "import"]}
-    for tab, (label, types) in zip(st.tabs(list(cats)), cats.items()):
+    hero("Activity Log", "Everything that happens in the system, grouped by category.")
+    CATS = {"All": None, "Sign-ups": ["signup"], "Leads": ["lead"], "Sales": ["sale"],
+            "Payments": ["paid"], "Outreach": ["outreach"], "Imports": ["import", "dealer"]}
+    df = q("SELECT event_type, description, created_at FROM activity_log ORDER BY created_at DESC LIMIT 500")
+    kw = st.text_input("🔎 Search activity", placeholder="e.g. a name or a car model")
+    if kw: df = df[df.description.str.contains(kw, case=False, na=False)]
+    tabs = st.tabs([f"{n} ({len(df) if t is None else int(df.event_type.isin(t).sum())})" for n, t in CATS.items()])
+    for tab, (n, t) in zip(tabs, CATS.items()):
         with tab:
-            if types:
-                ph = ",".join("?" * len(types))
-                df = q(f"SELECT created_at, event_type, description FROM activity_log WHERE event_type IN ({ph}) ORDER BY id DESC LIMIT 50", tuple(types))
-            else:
-                df = q("SELECT created_at, event_type, description FROM activity_log ORDER BY id DESC LIMIT 50")
-            st.caption(f"Latest {len(df)} record(s) (max 50)")
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            v = df if t is None else df[df.event_type.isin(t)]
+            if v.empty: st.info("Nothing here yet.")
+            else: st.dataframe(v.rename(columns={"event_type": "type"}), use_container_width=True, hide_index=True)
 
 # ================= SA PORTAL =================
 elif page == "📝 Sign Up":
