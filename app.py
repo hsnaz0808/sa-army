@@ -61,14 +61,14 @@ def llm(prompt, temp=0.7):
 def gen_outreach(dealer, brand, area, sa_name=None):
     who = f"Sales Advisor {sa_name} at {dealer} ({brand}, {area})" if sa_name else f"a Sales Advisor at {dealer} ({brand}, {area})"
     return llm(f"""Write a short WhatsApp message from Energi Elite (Malaysian EV home charger company) to {who}.
-Goal: invite them to our referral programme: RM200 for every home charger sold through their referral.
+Goal: invite them to our referral programme: RM250 for every home charger sold through their referral.
 Facts you may use (do not invent anything else): our E1 home charger is 7kW / 32A, TUV CE certified, with free charger relocation within 5km, and works for every EV brand and model.
-Rules: casual Malaysian English (a little Bahasa ok), max 4 sentences, warm not spammy, mention RM200, max 1 emoji, end with a soft question.
+Rules: casual Malaysian English (a little Bahasa ok), max 4 sentences, warm not spammy, mention RM250, max 1 emoji, end with a soft question.
 Return ONLY the message.""")
 
 def gen_nudge(name):
     return llm(f"""Write a 2-sentence friendly WhatsApp nudge from Energi Elite to SA {name} who hasn't sent a lead in a while.
-Remind them RM200 per charger, and that sending a lead takes 30 seconds. Casual Malaysian English, max 1 emoji. Return ONLY the message.""")
+Remind them RM250 per charger, and that sending a lead takes 30 seconds. Casual Malaysian English, max 1 emoji. Return ONLY the message.""")
 
 def regex_lead(msg):
     msg = re.sub(r"(?im)^ref:.*$", "", msg)
@@ -150,7 +150,7 @@ def seed_demo():
                 (f"[DEMO] {b} {a}", b, a, f"6011000{i:04d}", "Contacted" if i < 8 else "Not contacted")).lastrowid)
             if i < 8:
                 c.execute("INSERT INTO outreach (dealership_id, message, status, created_at, recipient, recipient_phone) VALUES (?,?,?,?,?,?)",
-                    (dids[-1], f"Hi, we are from Energi Elite. For every E1 charger sold through your referral at {b} {a}, you earn RM200. Interested to know more?", "Sent", ago(20 - i), f"[DEMO] {b} {a}", f"6011000{i:04d}"))
+                    (dids[-1], f"Hi, we are from Energi Elite. For every E1 charger sold through your referral at {b} {a}, you earn RM250. Interested to know more?", "Sent", ago(20 - i), f"[DEMO] {b} {a}", f"6011000{i:04d}"))
                 c.execute("INSERT INTO activity_log (event_type, description, created_at) VALUES (?,?,?)", ("outreach", f"Marked as sent: [DEMO] {b} {a}", ago(20 - i)))
         for n, (name, di, state, plan) in enumerate(sas, 1):
             code = f"EE-{name.split()[0].upper()[:6]}{n:02d}" if state != "invited" else None
@@ -255,7 +255,7 @@ if page == "📊 Dashboard":
     due = q("SELECT COALESCE(SUM(amount),0) a FROM commissions WHERE status='Payable'").iloc[0]["a"]
     c = st.columns(5)
     c[0].metric("SAs invited", len(s), help="All SAs in our list, including those who have not signed up yet."); c[1].metric("SAs signed up", len(reg), help="SAs who created their own account (status is not Invited)."); c[2].metric("Total leads", len(l), help="Buyers referred by SAs so far.")
-    c[3].metric("Sales (Sold)", int((l.status == "Sold").sum()), help="Leads that became a charger sale. Each one earns the SA RM200."); c[4].metric("Unpaid commission", f"RM{due:.0f}", help="RM200 commissions for sold chargers that we have not paid yet.")
+    c[3].metric("Sales (Sold)", int((l.status == "Sold").sum()), help="Leads that became a charger sale. Each one earns the SA RM250."); c[4].metric("Unpaid commission", f"RM{due:.0f}", help="RM250 commissions for sold chargers that we have not paid yet.")
     st.subheader("Funnel")
     st.bar_chart(pd.DataFrame({"Stage": names, "Count": vals}).set_index("Stage"), color="#14b8a6")
     drops = [(1 - vals[i + 1] / vals[i], i) for i in range(2, 6) if vals[i]]
@@ -388,7 +388,7 @@ elif page == "👥 SAs":
                 flash("✅ Nudge saved. Find it in Outreach → To send."); st.rerun()
 
 elif page == "📋 Leads & Commissions":
-    hero("Leads & Commissions", "RM200 commission is only created when lead status = Sold.")
+    hero("Leads & Commissions", "RM250 commission is only created when lead status = Sold.")
     pool = q("SELECT s.id, s.name, COUNT(l.id) n FROM sas s JOIN leads l ON l.sa_id=s.id GROUP BY s.id ORDER BY s.name")
     if pool.empty:
         st.info("No leads yet.")
